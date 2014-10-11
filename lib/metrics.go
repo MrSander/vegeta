@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/bmizerany/perks/quantile"
+	hdr "github.com/codahale/hdrhistogram"
 )
 
 // Metrics holds the stats computed out of a slice of Results
@@ -16,6 +16,7 @@ type Metrics struct {
 		P95  time.Duration `json:"95th"` // P95 is the 95th percentile upper value
 		P99  time.Duration `json:"99th"` // P99 is the 99th percentile upper value
 		Max  time.Duration `json:"max"`
+		Min  time.Duration `json:"min"`
 	} `json:"latencies"`
 
 	BytesIn struct {
@@ -52,20 +53,20 @@ func NewMetrics(r Results) *Metrics {
 
 	var (
 		errorSet       = map[string]struct{}{}
-		quants         = quantile.NewTargeted(0.50, 0.95, 0.99)
 		totalSuccess   int
 		totalLatencies time.Duration
 		latest         time.Time
 	)
 
 	for _, result := range r {
-		quants.Insert(float64(result.Latency))
 		m.StatusCodes[strconv.Itoa(int(result.Code))]++
 		totalLatencies += result.Latency
 		m.BytesOut.Total += result.BytesOut
 		m.BytesIn.Total += result.BytesIn
 		if result.Latency > m.Latencies.Max {
 			m.Latencies.Max = result.Latency
+		} else if result.Latency < m.Latencies.Min {
+			m.Latencies.Min = result.Latency
 		}
 		if end := result.Timestamp.Add(result.Latency); end.After(latest) {
 			latest = end
@@ -78,13 +79,18 @@ func NewMetrics(r Results) *Metrics {
 		}
 	}
 
+	hist := hdr.New(int64(m.Latencies.Min), int64(m.Latencies.Max), 5)
+	for _, result := range r {
+		hist.RecordValue(int64(result.Latency))
+	}
+
 	m.Requests = uint64(len(r))
 	m.Duration = r[len(r)-1].Timestamp.Sub(r[0].Timestamp)
 	m.Wait = latest.Sub(r[len(r)-1].Timestamp)
 	m.Latencies.Mean = time.Duration(float64(totalLatencies) / float64(m.Requests))
-	m.Latencies.P50 = time.Duration(quants.Query(0.50))
-	m.Latencies.P95 = time.Duration(quants.Query(0.95))
-	m.Latencies.P99 = time.Duration(quants.Query(0.99))
+	m.Latencies.P50 = time.Duration(hist.ValueAtQuantile(0.50))
+	m.Latencies.P95 = time.Duration(hist.ValueAtQuantile(0.95))
+	m.Latencies.P99 = time.Duration(hist.ValueAtQuantile(0.99))
 	m.BytesIn.Mean = float64(m.BytesIn.Total) / float64(m.Requests)
 	m.BytesOut.Mean = float64(m.BytesOut.Total) / float64(m.Requests)
 	m.Success = float64(totalSuccess) / float64(m.Requests)
